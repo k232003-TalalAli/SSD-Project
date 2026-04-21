@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+#database seeder
+database_init.py
+
+# Firebase credentials
+*.json
+
+# Logs and temp files
+*.log
+*.txt
+
+# VS Code settings
+.vscode/
+
+# Environment files
+.env
+
+# OS-specific
+Thumbs.db
+.DS_Store
