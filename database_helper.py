@@ -181,7 +181,7 @@ def get_chatlogs() -> str | None:
         return None
     with open(TEMP_CHAT_DATA, "r", encoding="utf-8") as f:
         return f.read()
-
+    
 # ══════════════════════════════════════════════════════════════════════════════
 #  UPDATE: DB + TEMP FILE
 # ══════════════════════════════════════════════════════════════════════════════

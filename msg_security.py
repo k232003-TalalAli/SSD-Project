@@ -1,4 +1,3 @@
-import design
 import re
 import des
 import rsa
@@ -9,7 +8,6 @@ import database_helper
 #DES (for chat encrption)------------------------------------------------------------------------------------------------------------------- 
 
 def set_des_key():
-   with open(design.key_file_path, 'r') as file:
     key_des = database_helper.get_des_key()
     return  key_des
 

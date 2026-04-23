@@ -129,7 +129,7 @@ def rotate_left(number, bits_to_rotate):
     return ((number << bits_to_rotate) | 
             (number >> (32 - bits_to_rotate))) & 0xffffffff # The & 0xffffffff is to Ensure the Number is 32 bits long
 def main():
-    test_message = "Hello, World"
+    test_message = "test1234"
     hash_result = calculate_sha1(test_message)
 
     print(f"Input message: {test_message}")

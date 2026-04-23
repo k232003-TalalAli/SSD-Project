@@ -1,25 +1,26 @@
 import queue
 import threading
 import time
-from dataclasses import dataclass
+import builtins
 from typing import Dict, List, Optional
 
-
-@dataclass
-class SharedConnectionState:
-    user1_ip: Optional[str] = None
-    user2_ip: Optional[str] = None
-    user1_session_id: Optional[str] = None
-    user2_session_id: Optional[str] = None
-    chat_in_progress: bool = False
+import database_helper
 
 
 class ConnectionStateManager:
     """Thread-safe shared state manager for two-user chat lifecycle."""
 
-    def __init__(self, poll_interval_seconds: float = 0.75) -> None:
-        self._state = SharedConnectionState()
+    def __init__(
+        self,
+        poll_interval_seconds: float = 0.75,
+        stale_session_timeout_seconds: float = 300.0,
+    ) -> None:
+        self._user_ips: Dict[str, Optional[str]] = {}
+        self._user_session_ids: Dict[str, Optional[str]] = {}
+        self._last_seen: Dict[str, float] = {}
+        self._chat_in_progress = False
         self._poll_interval_seconds = poll_interval_seconds
+        self._stale_session_timeout_seconds = stale_session_timeout_seconds
         self._lock = threading.Lock()
         self._events: Dict[str, queue.Queue[str]] = {}
         self._monitor_thread: Optional[threading.Thread] = None
@@ -43,21 +44,41 @@ class ConnectionStateManager:
 
     def connect_user(self, username: str, ip_address: str, session_id: str) -> None:
         with self._lock:
-            if username == "user1":
-                self._state.user1_ip = ip_address
-                self._state.user1_session_id = session_id
-            elif username == "user2":
-                self._state.user2_ip = ip_address
-                self._state.user2_session_id = session_id
+            self._user_ips[username] = ip_address
+            self._user_session_ids[username] = session_id
+            self._last_seen[username] = time.time()
+
+    def heartbeat(self, username: str, session_id: str) -> None:
+        with self._lock:
+            tracked_session_id = self._user_session_ids.get(username)
+            if tracked_session_id != session_id:
+                return
+            self._last_seen[username] = time.time()
 
     def disconnect_user(self, username: str, session_id: str) -> None:
+        account_id = database_helper.get_account_id_by_username(username)
         with self._lock:
-            if username == "user1" and self._state.user1_session_id == session_id:
-                self._state.user1_ip = None
-                self._state.user1_session_id = None
-            elif username == "user2" and self._state.user2_session_id == session_id:
-                self._state.user2_ip = None
-                self._state.user2_session_id = None
+            tracked_session_id = self._user_session_ids.get(username)
+            if tracked_session_id != session_id:
+                return
+            self._user_ips[username] = None
+            self._user_session_ids[username] = None
+            self._last_seen[username] = 0.0
+            if not any(ip for ip in self._user_ips.values()):
+                self._chat_in_progress = False
+
+        if account_id is not None:
+            database_helper.update_ip_address(account_id, None)
+
+    def force_disconnect_user(self, username: str) -> None:
+        account_id = database_helper.get_account_id_by_username(username)
+        with self._lock:
+            self._user_ips[username] = None
+            self._user_session_ids[username] = None
+            self._last_seen[username] = 0.0
+
+        if account_id is not None:
+            database_helper.update_ip_address(account_id, None)
 
     def consume_events(self, username: str) -> List[str]:
         pending: List[str] = []
@@ -70,15 +91,13 @@ class ConnectionStateManager:
                 pending.append(event_queue.get_nowait())
         return pending
 
-    def get_snapshot(self) -> SharedConnectionState:
+    def get_snapshot(self) -> Dict[str, Dict[str, Optional[str]]]:
         with self._lock:
-            return SharedConnectionState(
-                user1_ip=self._state.user1_ip,
-                user2_ip=self._state.user2_ip,
-                user1_session_id=self._state.user1_session_id,
-                user2_session_id=self._state.user2_session_id,
-                chat_in_progress=self._state.chat_in_progress,
-            )
+            return {
+                "ips": dict(self._user_ips),
+                "session_ids": dict(self._user_session_ids),
+                "chat_in_progress": self._chat_in_progress,
+            }
 
     def _emit_to_user(self, username: str, event_name: str) -> None:
         event_queue = self._events.get(username)
@@ -91,46 +110,46 @@ class ConnectionStateManager:
 
     def _monitor_loop(self) -> None:
         while not self._stop_event.is_set():
+            users_to_expire: List[str] = []
             with self._lock:
-                user1_ip = self._state.user1_ip
-                user2_ip = self._state.user2_ip
-                chat_in_progress = self._state.chat_in_progress
+                now = time.time()
+                for username, session_id in self._user_session_ids.items():
+                    if not session_id:
+                        continue
+                    last_seen = self._last_seen.get(username, 0.0)
+                    if now - last_seen > self._stale_session_timeout_seconds:
+                        self._user_ips[username] = None
+                        self._user_session_ids[username] = None
+                        self._last_seen[username] = 0.0
+                        users_to_expire.append(username)
 
-                both_none = user1_ip is None and user2_ip is None
-                both_present = user1_ip is not None and user2_ip is not None
-                one_missing = (user1_ip is None) != (user2_ip is None)
+                active_users = [user for user, ip in self._user_ips.items() if ip]
+                active_count = len(active_users)
 
-                # Both are None -> do nothing
-                if both_none:
+                if active_count < 2:
+                    if self._chat_in_progress:
+                        self._chat_in_progress = False
                     pass
 
-                # Both are not None and chatInProgress=False -> start chat
-                elif both_present and not chat_in_progress:
-                    self._state.chat_in_progress = True
+                elif not self._chat_in_progress:
+                    self._chat_in_progress = True
                     self._emit_to_all("show_chat")
 
-                # Both are not None and chatInProgress=True -> do nothing
-                elif both_present and chat_in_progress:
-                    pass
-
-                # One is None and chatInProgress=True -> close chat for both
-                elif one_missing and chat_in_progress:
-                    self._state.chat_in_progress = False
-                    self._state.user1_ip = None
-                    self._state.user2_ip = None
-                    self._state.user1_session_id = None
-                    self._state.user2_session_id = None
-                    self._emit_to_all("close_chat")
-
-                # One is None and chatInProgress=False -> do nothing
                 else:
                     pass
+
+            for username in users_to_expire:
+                account_id = database_helper.get_account_id_by_username(username)
+                if account_id is not None:
+                    database_helper.update_ip_address(account_id, None)
 
             time.sleep(self._poll_interval_seconds)
 
 
-_manager_singleton = ConnectionStateManager()
-
-
 def get_connection_manager() -> ConnectionStateManager:
-    return _manager_singleton
+    singleton_name = "_streamlit_chat_connection_manager_singleton"
+    manager = getattr(builtins, singleton_name, None)
+    if manager is None:
+        manager = ConnectionStateManager()
+        setattr(builtins, singleton_name, manager)
+    return manager
