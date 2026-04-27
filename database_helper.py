@@ -3,6 +3,12 @@ from firebase_admin import credentials, firestore
 import os
 import subprocess
 import platform
+from datetime import datetime, timezone
+from typing import Any, cast
+
+
+def _debug(message: str):
+    print(f"[database_helper] {message}", flush=True)
 
 def _unhide(filepath):
     if platform.system() == "Windows":
@@ -15,11 +21,19 @@ def _hide(filepath):
 # ── Init ──────────────────────────────────────────────────────────────────────
 def _init_firebase():
     if not firebase_admin._apps:
-        if not os.path.exists("serviceAccountKey.json"):
-           print("service Key not found in the directory, please setup the serviceAccount key and try again")
-        else:
-           cred = credentials.Certificate("serviceAccountKey.json")
-        firebase_admin.initialize_app(cred)
+        key_path = "serviceAccountKey.json"
+        if not os.path.exists(key_path):
+            message = "serviceAccountKey.json not found in the project root"
+            _debug(message)
+            raise FileNotFoundError(message)
+
+        try:
+            cred = credentials.Certificate(key_path)
+            firebase_admin.initialize_app(cred)
+            _debug("Firebase app initialized successfully")
+        except Exception as exc:
+            _debug(f"Firebase initialization failed: {exc}")
+            raise
 
 _init_firebase()
 db = firestore.client()
@@ -106,10 +120,12 @@ def _update_temp_field(account_id: str, field: str, value):
 
 def cache_data():
     """Fetch everything from Firebase and write to temp files."""
+    _debug("cache_data() started")
 
     # ── app_data ──────────────────────────────────────────────────────────────
-    des_doc = db.collection("app_data").document("config").get()
-    des_key = des_doc.to_dict().get("des_key", "") if des_doc.exists else ""
+    des_doc = cast(Any, db.collection("app_data").document("config").get())
+    des_doc_data = des_doc.to_dict() if getattr(des_doc, "exists", False) else {}
+    des_key = (des_doc_data or {}).get("des_key", "")
 
     account_refs = db.collection("app_data").document("accounts") \
                      .collection("entries").stream()
@@ -125,15 +141,18 @@ def cache_data():
         }
 
     _write_app_data_temp({"des_key": des_key, "accounts": accounts})  # already hides itself
+    _debug(f"cache_data() wrote {len(accounts)} accounts to local temp cache")
 
     # ── chatlogs ──────────────────────────────────────────────────────────────
-    chat_doc = db.collection("chatlogs").document("data").get()
-    raw = chat_doc.to_dict().get("content", "") if chat_doc.exists else ""
+    chat_doc = cast(Any, db.collection("chatlogs").document("data").get())
+    chat_doc_data = chat_doc.to_dict() if getattr(chat_doc, "exists", False) else {}
+    raw = (chat_doc_data or {}).get("content", "")
 
     _unhide(TEMP_CHAT_DATA)                                    # ← unhide first
     with open(TEMP_CHAT_DATA, "w", encoding="utf-8") as f:
         f.write(raw)
     _hide(TEMP_CHAT_DATA)                                      # ← then re-hide
+    _debug("cache_data() updated local chat cache")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  GET FROM CACHE (no DB traffic)
@@ -226,3 +245,43 @@ def update_chatlogs(raw_content: str):
     with open(TEMP_CHAT_DATA, "w", encoding="utf-8") as f:
         f.write(raw_content)
     _hide(TEMP_CHAT_DATA)
+
+
+def append_chat_message(sender: str, text: str):
+    _debug(f"append_chat_message() sender={sender!r} text={text!r}")
+    try:
+        db.collection("chatlogs").document("data").collection("entries").add(
+            {
+                "sender": sender,
+                "text": text,
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+        _debug("append_chat_message() completed successfully")
+    except Exception as exc:
+        _debug(f"append_chat_message() failed: {exc}")
+        raise
+
+
+def get_chat_messages() -> list[dict]:
+    _debug("get_chat_messages() started")
+    messages = []
+    try:
+        entries = (
+            db.collection("chatlogs")
+            .document("data")
+            .collection("entries")
+            .order_by("created_at")
+            .stream()
+        )
+        for doc in entries:
+            data = doc.to_dict() or {}
+            sender = str(data.get("sender", "")).strip()
+            text = str(data.get("text", "")).strip()
+            if sender and text:
+                messages.append({"sender": sender, "text": text})
+        _debug(f"get_chat_messages() loaded {len(messages)} messages")
+    except Exception as exc:
+        _debug(f"get_chat_messages() failed: {exc}")
+        raise
+    return messages

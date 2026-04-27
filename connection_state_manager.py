@@ -18,6 +18,7 @@ class ConnectionStateManager:
         self._user_ips: Dict[str, Optional[str]] = {}
         self._user_session_ids: Dict[str, Optional[str]] = {}
         self._last_seen: Dict[str, float] = {}
+        self._chat_messages: List[Dict[str, str]] = []
         self._chat_in_progress = False
         self._poll_interval_seconds = poll_interval_seconds
         self._stale_session_timeout_seconds = stale_session_timeout_seconds
@@ -66,6 +67,7 @@ class ConnectionStateManager:
             self._last_seen[username] = 0.0
             if not any(ip for ip in self._user_ips.values()):
                 self._chat_in_progress = False
+                self._chat_messages = []
 
         if account_id is not None:
             database_helper.update_ip_address(account_id, None)
@@ -76,9 +78,27 @@ class ConnectionStateManager:
             self._user_ips[username] = None
             self._user_session_ids[username] = None
             self._last_seen[username] = 0.0
+            if not any(ip for ip in self._user_ips.values()):
+                self._chat_in_progress = False
+                self._chat_messages = []
 
         if account_id is not None:
             database_helper.update_ip_address(account_id, None)
+
+    def send_message(self, username: str, text: str) -> bool:
+        sanitized_text = text.strip()
+        if not sanitized_text:
+            return False
+
+        with self._lock:
+            if not self._user_ips.get(username):
+                return False
+            self._chat_messages.append({"sender": username, "text": sanitized_text})
+        return True
+
+    def get_messages(self) -> List[Dict[str, str]]:
+        with self._lock:
+            return [dict(message) for message in self._chat_messages]
 
     def consume_events(self, username: str) -> List[str]:
         pending: List[str] = []
@@ -91,7 +111,7 @@ class ConnectionStateManager:
                 pending.append(event_queue.get_nowait())
         return pending
 
-    def get_snapshot(self) -> Dict[str, Dict[str, Optional[str]]]:
+    def get_snapshot(self) -> Dict[str, object]:
         with self._lock:
             return {
                 "ips": dict(self._user_ips),
@@ -129,14 +149,13 @@ class ConnectionStateManager:
                 if active_count < 2:
                     if self._chat_in_progress:
                         self._chat_in_progress = False
-                    pass
+                        self._emit_to_all("close_chat")
+                    if active_count == 0:
+                        self._chat_messages = []
 
                 elif not self._chat_in_progress:
                     self._chat_in_progress = True
                     self._emit_to_all("show_chat")
-
-                else:
-                    pass
 
             for username in users_to_expire:
                 account_id = database_helper.get_account_id_by_username(username)

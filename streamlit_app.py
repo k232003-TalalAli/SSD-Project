@@ -1,12 +1,13 @@
 import atexit
 import builtins
+import html
 import hmac
-import importlib
 import ipaddress
 import secrets
 import socket
 import threading
 import time
+import traceback
 
 import streamlit as st
 
@@ -14,106 +15,9 @@ from connection_state_manager import get_connection_manager
 import database_helper
 import msg_security
 
-try:
-    _autorefresh_module = importlib.import_module("streamlit_autorefresh")
-    st_autorefresh = _autorefresh_module.st_autorefresh
-except ImportError:
-    st_autorefresh = None
 
-
-_SYNC_THREAD_ATTR = "_cache_sync_thread"
-def _all_ips_active() -> bool:
-    """True if every known account has a non-null IP in the local cache."""
-    try:
-        ids = database_helper.get_all_account_ids()
-        if not ids:
-            return False
-        return all(database_helper.get_ip_address(aid) for aid in ids)
-    except Exception:
-        return False
-
-
-def _active_ip_count() -> int:
-    """
-    Always refresh cache from DB first, then count active IPs from local temp.
-    This avoids per-process stale cache causing one user to stay in waiting.
-    """
-    try:
-        database_helper.cache_data()
-    except Exception:
-        pass
-
-    try:
-        return sum(
-            1
-            for aid in database_helper.get_all_account_ids()
-            if database_helper.get_ip_address(aid)
-        )
-    except Exception:
-        return 0
-
-
-def is_other_user_connected() -> bool:
-    """
-    Fetch fresh data from the database, then check whether the other user
-    (everyone except the currently logged-in user) has a non-null IP address.
-
-    Returns True  — other user is still connected.
-    Returns False — other user's IP is None (disconnected or never joined).
-
-    Intended use: call this before allowing a message to be sent so we never
-    write into a chat session where the other side has already gone away.
-    """
-    try:
-        database_helper.cache_data()
-    except Exception:
-        return False
-
-    my_account_id = st.session_state.get("account_id", "")
-
-    try:
-        all_ids = database_helper.get_all_account_ids()
-    except Exception:
-        return False
-
-    for account_id in all_ids:
-        if account_id == my_account_id:
-            continue  # skip ourselves
-        ip = database_helper.get_ip_address(account_id)
-        if not ip:
-            return False  # other user has no active IP
-    return True
-
-
-def _start_cache_sync_thread() -> None:
-    """
-    Spawn a daemon thread (once per process) that refreshes the local
-    temp-file cache from Firebase every second until both users have active IPs.
-    Safe to call on every Streamlit rerun — no-op if already running.
-    """
-    existing: threading.Thread | None = getattr(builtins, _SYNC_THREAD_ATTR, None)
-    if existing is not None and existing.is_alive():
-        return  # already running
-
-    def _sync_loop() -> None:
-        while True:
-            try:
-                if _all_ips_active():
-                    break  # both connected — stop hitting Firebase
-                database_helper.cache_data()
-            except Exception:
-                pass
-            time.sleep(1.0)
-        setattr(builtins, _SYNC_THREAD_ATTR, None)  # allow restart later
-
-    t = threading.Thread(target=_sync_loop, daemon=True, name="cache-sync")
-    setattr(builtins, _SYNC_THREAD_ATTR, t)
-    t.start()
-
-
-def _stop_cache_sync_thread() -> None:
-    """Clear the thread reference (daemon will die on its own)."""
-    setattr(builtins, _SYNC_THREAD_ATTR, None)
+def _debug(message: str) -> None:
+    print(f"[streamlit_app] {message}", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,20 +37,24 @@ def apply_blue_dark_theme() -> None:
                 --border: #4a6fa3;
             }
 
+            html, body {
+                background-color: #1a2f4d !important;
+            }
+
             .stApp {
                 background:
                     radial-gradient(1200px 500px at 20% -10%, #2d5a8f 0%, transparent 60%),
                     radial-gradient(900px 420px at 95% 0%, #234a75 0%, transparent 58%),
-                    linear-gradient(180deg, #1a2f4d 0%, #1d3a54 100%);
+                    linear-gradient(180deg, #1a2f4d 0%, #1d3a54 100%) !important;
                 color: var(--text-main);
             }
 
             [data-testid="stHeader"] {
-                background: rgba(26, 47, 77, 0.8);
+                background: rgba(26, 47, 77, 0.8) !important;
                 border-bottom: 1px solid rgba(74, 143, 255, 0.25);
             }
 
-            h1, h2, h3, p, label {
+            h1, h2, h3, p, label, span {
                 color: var(--text-main) !important;
             }
 
@@ -175,6 +83,114 @@ def apply_blue_dark_theme() -> None:
             .stSuccess, .stInfo, .stWarning, .stError {
                 background-color: rgba(42, 64, 102, 0.9) !important;
                 border: 1px solid var(--border) !important;
+            }
+
+            /* ── Transparent wrappers ── */
+            [data-testid="stMainBlockContainer"],
+            [data-testid="stVerticalBlock"],
+            [data-testid="stHorizontalBlock"],
+            [data-testid="stChatFloatingInputContainer"],
+            [data-testid="stChatInput"],
+            [data-testid="stBottomBlockContainer"],
+            .element-container, .main, .block-container {
+                background-color: transparent !important;
+                background: transparent !important;
+                box-shadow: none !important;
+            }
+
+            /* ── stBottom: nuke white with wildcard selector ── */
+            [data-testid="stBottom"] * {
+                background-color: transparent !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stBottom"],
+            [data-testid="stBottom"] > div,
+            [data-testid="stBottom"] > div > div,
+            [data-testid="stBottom"] > div > div > div,
+            [data-testid="stBottom"] > div > div > div > div,
+            [data-testid="stBottom"] > div > div > div > div > div {
+                background: #1a2f4d !important;
+                background-color: #1a2f4d !important;
+                box-shadow: none !important;
+                border: none !important;
+            }
+
+            /* Preserve textarea and button colours inside stBottom */
+            [data-testid="stBottom"] textarea {
+                background: #223f66 !important;
+            }
+            [data-testid="stBottom"] button {
+                background: #4a8fff !important;
+            }
+
+            /* Thin accent border on top */
+            [data-testid="stBottom"] {
+                border-top: 1px solid rgba(74,143,255,0.2) !important;
+            }
+
+            /* ── Chat input pill ── */
+            [data-testid="stChatInput"] textarea {
+                background: #223f66 !important;
+                color: #f0f4ff !important;
+                border: 1px solid #4a6fa3 !important;
+                border-radius: 24px !important;
+                padding: 0.55rem 3rem 0.55rem 1.1rem !important;
+                font-size: 0.9rem !important;
+                line-height: 1.4 !important;
+                resize: none !important;
+            }
+
+            [data-testid="stChatInput"] textarea::placeholder {
+                color: #8ab4cc !important;
+            }
+
+            /* Remove red focus ring — use a subtle blue glow instead */
+            [data-testid="stChatInput"] textarea:focus {
+                outline: none !important;
+                box-shadow: none !important;
+                border-color: #4a8fff !important;
+            }
+            [data-testid="stChatInput"] textarea:focus-visible {
+                outline: none !important;
+                box-shadow: none !important;
+                border-color: #4a8fff !important;
+            }
+
+            /* ── Send button centred in the pill ── */
+            [data-testid="stChatInput"] button {
+                background: #4a8fff !important;
+                color: #ffffff !important;
+                border: none !important;
+                border-radius: 50% !important;
+                width: 30px !important;
+                height: 30px !important;
+                min-width: 0 !important;
+                padding: 0 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                position: absolute !important;
+                right: 8px !important;
+                top: 50% !important;
+                transform: translateY(-50%) !important;
+                margin: 0 !important;
+            }
+
+            [data-testid="stChatInput"] button:hover {
+                background: #6a9fff !important;
+            }
+
+            /* Divider styling */
+            hr {
+                border-color: rgba(74, 143, 255, 0.3) !important;
+                margin: 0.75rem 0 !important;
+            }
+
+            /* Caption styling for empty state */
+            .stCaption {
+                color: var(--text-muted) !important;
+                text-align: center;
+                font-style: italic;
             }
         </style>
         """,
@@ -285,20 +301,131 @@ def render_waiting_state() -> None:
     )
 
 
+def get_shared_chat_messages() -> list[dict[str, str]]:
+    """Read chat messages directly from Firestore."""
+    _debug("get_shared_chat_messages() refreshing from database")
+    try:
+        messages = database_helper.get_chat_messages()
+        _debug(f"get_shared_chat_messages() loaded {len(messages)} messages")
+        return messages
+    except Exception:
+        _debug("get_shared_chat_messages() failed")
+        traceback.print_exc()
+        return []
+
+
+def append_shared_chat_message(sender: str, text: str) -> bool:
+    body = text.strip()
+    _debug(f"append_shared_chat_message() sender={sender!r} body={body!r}")
+    if not body:
+        _debug("append_shared_chat_message() rejected empty message")
+        return False
+
+    try:
+        database_helper.append_chat_message(sender, body)
+        _debug("append_shared_chat_message() completed successfully")
+        return True
+    except Exception:
+        _debug("append_shared_chat_message() failed")
+        traceback.print_exc()
+        return False
+
+
+@st.fragment(run_every=2)
+def _render_message_feed() -> None:
+    """Auto-refreshing fragment — only the feed, reruns every 2 s."""
+    my_username = st.session_state.get("username", "")
+
+    st.markdown(
+        """
+        <style>
+            .wa-feed { display: flex; flex-direction: column; gap: 10px; padding: 10px 1rem; }
+            .wa-row { display: flex; width: 100%; }
+            .wa-row.sent { justify-content: flex-end;  padding-left: 25%; }
+            .wa-row.recv { justify-content: flex-start; padding-right: 25%; }
+            .wa-bubble {
+                display: inline-block;
+                padding: 7px 12px;
+                border-radius: 8px;
+                font-size: 0.9rem;
+                line-height: 1.45;
+                word-wrap: break-word;
+                word-break: break-word;
+                white-space: pre-wrap;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+                max-width: 100%;
+            }
+            .wa-bubble.sent { background: #2e5fc2; color: #fff; border-bottom-right-radius: 2px; }
+            .wa-bubble.recv {
+                background: #2d4f7c; color: #deeeff;
+                border: 1px solid rgba(100,160,255,0.18);
+                border-bottom-left-radius: 2px;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    messages = get_shared_chat_messages()
+
+    pending_outgoing = st.session_state.get("pending_outgoing_message", "").strip()
+    if pending_outgoing:
+        already_in_db = any(
+            m.get("sender") == my_username and m.get("text") == pending_outgoing
+            for m in messages
+        )
+        if already_in_db:
+            st.session_state["pending_outgoing_message"] = ""
+        else:
+            messages.append({"sender": my_username, "text": pending_outgoing})
+
+    if not messages:
+        st.caption("No messages yet. Start the conversation.")
+    else:
+        rows_html = ""
+        for message in messages:
+            sender  = message.get("sender", "Unknown")
+            body    = message.get("text", "")
+            is_mine = sender == my_username
+            side    = "sent" if is_mine else "recv"
+            safe_body = html.escape(body)
+            rows_html += (
+                f'<div class="wa-row {side}">'
+                f'<div class="wa-bubble {side}">{safe_body}</div>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div class="wa-feed">{rows_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_chat_screen() -> None:
     st.success("Secure chat is connected")
-    st.write("Chat UI placeholder: hook your existing encrypted socket chat screen here.")
 
-    if st.button("Disconnect", type="secondary"):
-        manager = get_connection_manager()
+    manager = get_connection_manager()
+    my_username = st.session_state.get("username", "")
+    _debug(f"render_chat_screen() for user={my_username!r}")
+
+    st.subheader("Live Chat")
+
+    # Only keep Disconnect — Refresh is no longer needed
+    btn_col1, btn_col2 = st.columns([1, 3])
+    with btn_col1:
+        disconnect_clicked = st.button("Disconnect", type="secondary", key="chat_disconnect_button", use_container_width=True)
+
+    if disconnect_clicked:
+        _debug(f"Disconnect button pressed by {my_username!r}")
         account_id = st.session_state.get("account_id")
         if account_id:
             try:
                 database_helper.update_ip_address(account_id, None)
+                _debug(f"Cleared IP address for account_id={account_id!r}")
             except Exception:
-                pass
+                _debug("Failed to clear IP address during disconnect")
+                traceback.print_exc()
+
         manager.disconnect_user(st.session_state["username"], st.session_state["session_id"])
-        _stop_cache_sync_thread()
         close_chat()
         st.session_state["connected"] = False
         st.session_state["username"] = ""
@@ -306,33 +433,54 @@ def render_chat_screen() -> None:
         st.session_state["status_message"] = "You disconnected"
         st.rerun()
 
+    # Feed auto-refreshes every 2s inside fragment
+    _render_message_feed()
+
+    # Input lives outside fragment — native sticky positioning works correctly
+    outgoing_message = st.chat_input("Type a message...")
+    if outgoing_message:
+        _debug(f"Outgoing message submitted by {my_username!r}: {outgoing_message!r}")
+        if append_shared_chat_message(my_username, outgoing_message):
+            st.session_state["pending_outgoing_message"] = outgoing_message.strip()
+        else:
+            st.warning("Message could not be sent right now.")
+
 
 def connect_user(username: str, chat_password: str) -> None:
     st.session_state["login_error"] = ""
     username = username.strip()
+    _debug(f"connect_user() called for username={username!r}")
 
     try:
         database_helper.cache_data()
+        _debug("connect_user() cache_data() completed successfully")
     except Exception:
+        _debug("connect_user() cache_data() failed")
+        traceback.print_exc()
         st.session_state["login_error"] = "Could not load user data. Please try again."
         return
 
     if not secure_username_check(username):
+        _debug(f"connect_user() invalid username={username!r}")
         st.session_state["login_error"] = "Invalid username."
         return
 
     account_id = database_helper.get_account_id_by_username(username)
     if account_id is None:
+        _debug(f"connect_user() account_id lookup failed for username={username!r}")
         st.session_state["login_error"] = "Invalid username."
         return
 
     if not secure_password_check(account_id, chat_password):
+        _debug(f"connect_user() password check failed for account_id={account_id!r}")
         st.session_state["login_error"] = "Invalid chat password."
         return
 
     try:
         ip_address = get_local_ip_address()
+        _debug(f"connect_user() local ip resolved as {ip_address!r}")
     except (OSError, ValueError):
+        _debug("connect_user() could not resolve local IP")
         st.session_state["login_error"] = "Could not resolve local IP address."
         return
 
@@ -341,7 +489,10 @@ def connect_user(username: str, chat_password: str) -> None:
     try:
         database_helper.update_ip_address(account_id, ip_address)
         manager.connect_user(username, ip_address, st.session_state["session_id"])
+        _debug(f"connect_user() registered session for {username!r} with session_id={st.session_state['session_id']!r}")
     except Exception:
+        _debug("connect_user() failed while updating IP or registering manager state")
+        traceback.print_exc()
         st.session_state["login_error"] = "Could not connect right now. Please try again."
         return
 
@@ -370,20 +521,8 @@ def render_welcome_page() -> None:
 
 
 def refresh_for_connection_polling(key: str) -> None:
-    if st_autorefresh is not None:
-        st_autorefresh(interval=750, key=key)
-        return
-
-    st.markdown(
-        """
-        <script>
-            setTimeout(function() {
-                window.location.reload();
-            }, 1000);
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+    _debug(f"refresh_for_connection_polling() called with key={key!r}")
+    st.caption("Use the Refresh messages button to load the latest messages from the database.")
 
 
 def render_waiting_refresh_button() -> None:
@@ -411,7 +550,8 @@ def cleanup_current_session() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Secure Chat", page_icon="\U0001F512", layout="centered")
+    _debug("main() entered")
+    st.set_page_config(page_title="Secure Chat", page_icon="\U0001F512", layout="wide")
     apply_blue_dark_theme()
     init_session_state()
 
@@ -419,7 +559,10 @@ def main() -> None:
     if not st.session_state["manager_started"]:
         try:
             database_helper.cache_data()
+            _debug("main() initial cache_data() succeeded")
         except Exception:
+            _debug("main() initial cache_data() failed")
+            traceback.print_exc()
             pass
         manager.start_monitor()
         atexit.register(cleanup_current_session)
@@ -430,31 +573,35 @@ def main() -> None:
             st.session_state["username"],
             st.session_state["session_id"],
         )
-
-    # While connected but not yet in chat, keep the local temp-file cache
-    # continuously refreshed from Firebase so we see the other user's IP.
-    if st.session_state["connected"] and not st.session_state["chat_open"]:
-        _start_cache_sync_thread()
+        _debug(f"main() heartbeat sent for user={st.session_state['username']!r}")
 
     # Process events FIRST — a close_chat event sets connected=False so the
     # IP-count block below is skipped, landing directly on the welcome page
     # with no "waiting" flash in between.
     needs_rerun = process_events()
+    _debug(f"main() process_events() returned needs_rerun={needs_rerun}")
 
     # Only run IP-count logic when still connected after event processing.
     if st.session_state["connected"]:
-        active_ip_count = _active_ip_count()
-        if active_ip_count >= 2:
-            if not st.session_state["chat_open"]:
+        try:
+            database_helper.cache_data()
+            all_ids = database_helper.get_all_account_ids()
+            active_ip_count = sum(1 for aid in all_ids if database_helper.get_ip_address(aid))
+            _debug(f"main() active_ip_count={active_ip_count}")
+            if active_ip_count >= 2 and not st.session_state["chat_open"]:
                 show_chat_screen()
                 needs_rerun = True
+                _debug("main() opened chat screen after detecting two active users")
+        except Exception:
+            _debug("main() failed while checking active IP count")
+            traceback.print_exc()
 
     if needs_rerun:
+        _debug("main() triggering rerun")
         st.rerun()
 
     if st.session_state["chat_open"]:
         render_chat_screen()
-        refresh_for_connection_polling("chat_poll")
         return
 
     if st.session_state["connected"]:
